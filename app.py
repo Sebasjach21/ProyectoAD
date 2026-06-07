@@ -1,25 +1,21 @@
 import os
-import requests
 import psycopg2
 from psycopg2 import pool
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from datetime import datetime
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from twilio.rest import Client
 
-# Importamos la lógica SOAP y las notificaciones unificadas
+# Importamos la lógica SOAP
 from soap_logic import procesar_soap_facturacion
-#from notifications import enviar_notificaciones_sistema
 
 app = Flask(__name__)
 
-# Configuración global y abierta de CORS
+# Configuración global de CORS
 CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"], "allow_headers": ["Content-Type", "Authorization"]}})
 
-# Connection Pool para producción
+# ==========================================
+# 📦 CONEXIÓN A SUPABASE (POOL)
+# ==========================================
 db_url = os.getenv("DATABASE_URL")
 if not db_url:
     raise ValueError("Falta la variable de entorno DATABASE_URL")
@@ -36,7 +32,7 @@ def return_connection(conn):
     if conn:
         db_pool.putconn(conn)
 
-# DATOS MOCK (solo se usan si falla la BD)
+# Datos mock para productos (en caso de error de BD)
 PRODUCTOS_MOCK = [
     {"id": "00000000-0000-0000-0000-000000000001", "nombre": "Laptop Gaming ASUS ROG", "precio": 1299.99, "imagen_url": "https://via.placeholder.com/300?text=Laptop+Gaming", "stock": 10},
     {"id": "00000000-0000-0000-0000-000000000002", "nombre": "Monitor UltraWide 34\" LG", "precio": 549.99, "imagen_url": "https://via.placeholder.com/300?text=Monitor", "stock": 25}
@@ -56,7 +52,6 @@ WSDL_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 
     <types>
         <xsd:schema targetNamespace="uta.edu.ec.facturacion">
-            <!-- 1. ValidarFactura -->
             <xsd:element name="ValidarFactura">
                 <xsd:complexType>
                     <xsd:sequence>
@@ -71,8 +66,6 @@ WSDL_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
                     </xsd:sequence>
                 </xsd:complexType>
             </xsd:element>
-
-            <!-- 2. GenerarFacturaXML -->
             <xsd:element name="GenerarFacturaXML">
                 <xsd:complexType>
                     <xsd:sequence>
@@ -90,8 +83,6 @@ WSDL_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
                     </xsd:sequence>
                 </xsd:complexType>
             </xsd:element>
-
-            <!-- 3. ConsultarComprobante -->
             <xsd:element name="ConsultarComprobante">
                 <xsd:complexType>
                     <xsd:sequence>
@@ -115,14 +106,12 @@ WSDL_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
     <message name="ValidarFacturaResponseMsg">
         <part name="parameters" element="tns:ValidarFacturaResponse"/>
     </message>
-
     <message name="GenerarFacturaXMLRequest">
         <part name="parameters" element="tns:GenerarFacturaXML"/>
     </message>
     <message name="GenerarFacturaXMLResponseMsg">
         <part name="parameters" element="tns:GenerarFacturaXMLResponse"/>
     </message>
-
     <message name="ConsultarComprobanteRequest">
         <part name="parameters" element="tns:ConsultarComprobante"/>
     </message>
@@ -147,7 +136,6 @@ WSDL_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 
     <binding name="FacturacionBinding" type="tns:FacturacionPortType">
         <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
-        
         <operation name="ValidarFactura">
             <soap:operation soapAction="uta.edu.ec.facturacion/ValidarFactura"/>
             <input><soap:body use="literal"/></input>
@@ -179,11 +167,18 @@ def soap_endpoint():
     if request.method == 'GET' and 'wsdl' in request.args:
         return Response(WSDL_CONTENT, mimetype='text/xml')
     elif request.method == 'POST':
-        xml_respuesta = procesar_soap_facturacion(request.data)
-        return Response(xml_respuesta, mimetype='text/xml')
+        conn = None
+        try:
+            conn = get_connection()                     # obtener conexión del pool
+            xml_respuesta = procesar_soap_facturacion(request.data, conn)
+            return Response(xml_respuesta, mimetype='text/xml')
+        except Exception as e:
+            return Response(f"<Error>Error interno: {str(e)}</Error>", status=500, mimetype='text/xml')
+        finally:
+            if conn:
+                return_connection(conn)                 # devolver la conexión al pool
     else:
         return Response("Bad Request: use GET ?wsdl or POST SOAP envelope", status=400)
-
 
 # ==========================================
 # 🏠 RUTA PRINCIPAL
@@ -192,11 +187,9 @@ def soap_endpoint():
 def home():
     return jsonify({"success": True, "message": "API REST + SOAP funcionando correctamente."})
 
-
 # ==========================================
-# 📦 CRUD: MÓDULO DE PRODUCTOS
+# 📦 CRUD: PRODUCTOS
 # ==========================================
-
 @app.route("/productos", methods=["GET"])
 def listar_productos():
     conn = None
@@ -281,11 +274,9 @@ def eliminar_producto(id):
         if cursor: cursor.close()
         if conn: return_connection(conn)
 
-
 # ==========================================
-# 👥 CRUD: MÓDULO DE USUARIOS (Con Cédula)
+# 👥 CRUD: USUARIOS (con cédula, email, teléfono)
 # ==========================================
-
 @app.route("/usuarios", methods=["GET"])
 def listar_usuarios():
     conn = None
@@ -293,7 +284,7 @@ def listar_usuarios():
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, usuario, nombre_completo, rol, cedula FROM public.usuarios ORDER BY id ASC")
+        cursor.execute("SELECT id, usuario, nombre_completo, rol, cedula, email, telefono FROM public.usuarios ORDER BY id ASC")
         rows = cursor.fetchall()
         data = []
         for row in rows:
@@ -302,7 +293,9 @@ def listar_usuarios():
                 "usuario": row[1],
                 "nombre_completo": row[2],
                 "rol": row[3],
-                "cedula": row[4] if row[4] is not None else ""
+                "cedula": row[4] if row[4] is not None else "",
+                "email": row[5] if row[5] is not None else "",
+                "telefono": row[6] if row[6] is not None else ""
             })
         return jsonify({"success": True, "data": data})
     except Exception as e:
@@ -321,6 +314,8 @@ def crear_usuario():
         nombre_completo = data.get("nombre_completo")
         rol = data.get("rol", "Cliente")
         cedula = data.get("cedula")
+        email = data.get("email")
+        telefono = data.get("telefono")
 
         if not usuario or not nombre_completo or not cedula:
             return jsonify({"success": False, "message": "Usuario, nombre_completo y cédula son requeridos"}), 400
@@ -331,9 +326,9 @@ def crear_usuario():
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO public.usuarios (usuario, nombre_completo, rol, cedula)
-            VALUES (%s, %s, %s, %s) RETURNING id
-        """, (usuario, nombre_completo, rol, str(cedula)))
+            INSERT INTO public.usuarios (usuario, nombre_completo, rol, cedula, email, telefono)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+        """, (usuario, nombre_completo, rol, str(cedula), email, telefono))
         nuevo_id = cursor.fetchone()[0]
         conn.commit()
 
@@ -357,6 +352,8 @@ def actualizar_usuario(id):
         nombre_completo = data.get("nombre_completo")
         rol = data.get("rol")
         cedula = data.get("cedula")
+        email = data.get("email")
+        telefono = data.get("telefono")
 
         conn = get_connection()
         cursor = conn.cursor()
@@ -364,9 +361,11 @@ def actualizar_usuario(id):
             UPDATE public.usuarios 
             SET nombre_completo = COALESCE(%s, nombre_completo),
                 rol = COALESCE(%s, rol),
-                cedula = COALESCE(%s, cedula)
+                cedula = COALESCE(%s, cedula),
+                email = COALESCE(%s, email),
+                telefono = COALESCE(%s, telefono)
             WHERE id = %s
-        """, (nombre_completo, rol, cedula, id))
+        """, (nombre_completo, rol, cedula, email, telefono, id))
         conn.commit()
 
         return jsonify({"success": True, "message": f"Usuario {id} actualizado correctamente"})
@@ -394,11 +393,9 @@ def eliminar_usuario(id):
         if cursor: cursor.close()
         if conn: return_connection(conn)
 
-
 # ==========================================
-# 🛍️ CRUD: MÓDULO DE COMPRAS 
+# 🛍️ CRUD: COMPRAS
 # ==========================================
-
 @app.route("/compras", methods=["GET"])
 def listar_compras():
     conn = None
@@ -462,4 +459,4 @@ def registrar_compra():
         if conn: return_connection(conn)
 
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    app.run(debug=False, host="0.0.0.0", port=5001)
