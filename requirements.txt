@@ -5,3 +5,4 @@ resend==0.8.0
 requests==2.31.0
 Flask-Cors==3.0.10
 twilio==9.0.4
+lxml==5.1.0

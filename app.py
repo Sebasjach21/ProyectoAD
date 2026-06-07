@@ -2,13 +2,17 @@ import os
 import requests
 import psycopg2
 from psycopg2 import pool
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from twilio.rest import Client
+
+# Importamos la lógica SOAP y las notificaciones unificadas
+from soap_logic import procesar_soap_facturacion
+from notifications import enviar_notificaciones_sistema
 
 app = Flask(__name__)
 
@@ -32,46 +36,161 @@ def return_connection(conn):
     if conn:
         db_pool.putconn(conn)
 
-# DATOS MOCK
+# DATOS MOCK (solo se usan si falla la BD)
 PRODUCTOS_MOCK = [
     {"id": "00000000-0000-0000-0000-000000000001", "nombre": "Laptop Gaming ASUS ROG", "precio": 1299.99, "imagen_url": "https://via.placeholder.com/300?text=Laptop+Gaming", "stock": 10},
     {"id": "00000000-0000-0000-0000-000000000002", "nombre": "Monitor UltraWide 34\" LG", "precio": 549.99, "imagen_url": "https://via.placeholder.com/300?text=Monitor", "stock": 25}
 ]
 
-def enviar_notificaciones_sistema(destino_email, destino_celular, asunto, mensaje):
-    brave_host = os.getenv("BRAVE_SMTP_HOST", "smtp.bravehost.com")
-    brave_port = int(os.getenv("BRAVE_SMTP_PORT", 587))
-    brave_user = os.getenv("BRAVE_MAIL_USER")
-    brave_pass = os.getenv("BRAVE_MAIL_PASSWORD")
-    
-    if brave_user and brave_pass and destino_email:
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = brave_user
-            msg['To'] = destino_email
-            msg['Subject'] = asunto
-            msg.attach(MIMEText(f"<p>{mensaje}</p>", 'html'))
-            with smtplib.SMTP(brave_host, brave_port) as server:
-                server.starttls()
-                server.login(brave_user, brave_pass)
-                server.sendmail(brave_user, destino_email, msg.as_string())
-        except Exception as e:
-            print(f"[ERROR BRAVE EMAIL] {str(e)}")
-            
-    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
-    twilio_number = os.getenv("TWILIO_PHONE_NUMBER")
-    
-    if twilio_sid and twilio_token and twilio_number and destino_celular:
-        try:
-            client = Client(twilio_sid, twilio_token)
-            client.messages.create(body=f"{asunto}: {mensaje}", from_=twilio_number, to=destino_celular)
-        except Exception as e:
-            print(f"[ERROR TWILIO] {str(e)}")
+# ==========================================
+# 🧾 SERVICIO SOAP DE FACTURACIÓN
+# ==========================================
 
+WSDL_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
+<definitions name="FacturacionService"
+    targetNamespace="uta.edu.ec.facturacion"
+    xmlns="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:tns="uta.edu.ec.facturacion"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+    <types>
+        <xsd:schema targetNamespace="uta.edu.ec.facturacion">
+            <!-- 1. ValidarFactura -->
+            <xsd:element name="ValidarFactura">
+                <xsd:complexType>
+                    <xsd:sequence>
+                        <xsd:element name="xmlFactura" type="xsd:string"/>
+                    </xsd:sequence>
+                </xsd:complexType>
+            </xsd:element>
+            <xsd:element name="ValidarFacturaResponse">
+                <xsd:complexType>
+                    <xsd:sequence>
+                        <xsd:element name="estado" type="xsd:string"/>
+                    </xsd:sequence>
+                </xsd:complexType>
+            </xsd:element>
+
+            <!-- 2. GenerarFacturaXML -->
+            <xsd:element name="GenerarFacturaXML">
+                <xsd:complexType>
+                    <xsd:sequence>
+                        <xsd:element name="idCompra" type="xsd:string"/>
+                        <xsd:element name="cliente" type="xsd:string"/>
+                        <xsd:element name="correo" type="xsd:string"/>
+                        <xsd:element name="telefono" type="xsd:string"/>
+                    </xsd:sequence>
+                </xsd:complexType>
+            </xsd:element>
+            <xsd:element name="GenerarFacturaXMLResponse">
+                <xsd:complexType>
+                    <xsd:sequence>
+                        <xsd:element name="xmlGenerado" type="xsd:anyType"/>
+                    </xsd:sequence>
+                </xsd:complexType>
+            </xsd:element>
+
+            <!-- 3. ConsultarComprobante -->
+            <xsd:element name="ConsultarComprobante">
+                <xsd:complexType>
+                    <xsd:sequence>
+                        <xsd:element name="idCompra" type="xsd:string"/>
+                    </xsd:sequence>
+                </xsd:complexType>
+            </xsd:element>
+            <xsd:element name="ConsultarComprobanteResponse">
+                <xsd:complexType>
+                    <xsd:sequence>
+                        <xsd:element name="estado" type="xsd:string"/>
+                    </xsd:sequence>
+                </xsd:complexType>
+            </xsd:element>
+        </xsd:schema>
+    </types>
+
+    <message name="ValidarFacturaRequest">
+        <part name="parameters" element="tns:ValidarFactura"/>
+    </message>
+    <message name="ValidarFacturaResponseMsg">
+        <part name="parameters" element="tns:ValidarFacturaResponse"/>
+    </message>
+
+    <message name="GenerarFacturaXMLRequest">
+        <part name="parameters" element="tns:GenerarFacturaXML"/>
+    </message>
+    <message name="GenerarFacturaXMLResponseMsg">
+        <part name="parameters" element="tns:GenerarFacturaXMLResponse"/>
+    </message>
+
+    <message name="ConsultarComprobanteRequest">
+        <part name="parameters" element="tns:ConsultarComprobante"/>
+    </message>
+    <message name="ConsultarComprobanteResponseMsg">
+        <part name="parameters" element="tns:ConsultarComprobanteResponse"/>
+    </message>
+
+    <portType name="FacturacionPortType">
+        <operation name="ValidarFactura">
+            <input message="tns:ValidarFacturaRequest"/>
+            <output message="tns:ValidarFacturaResponseMsg"/>
+        </operation>
+        <operation name="GenerarFacturaXML">
+            <input message="tns:GenerarFacturaXMLRequest"/>
+            <output message="tns:GenerarFacturaXMLResponseMsg"/>
+        </operation>
+        <operation name="ConsultarComprobante">
+            <input message="tns:ConsultarComprobanteRequest"/>
+            <output message="tns:ConsultarComprobanteResponseMsg"/>
+        </operation>
+    </portType>
+
+    <binding name="FacturacionBinding" type="tns:FacturacionPortType">
+        <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+        
+        <operation name="ValidarFactura">
+            <soap:operation soapAction="uta.edu.ec.facturacion/ValidarFactura"/>
+            <input><soap:body use="literal"/></input>
+            <output><soap:body use="literal"/></output>
+        </operation>
+        <operation name="GenerarFacturaXML">
+            <soap:operation soapAction="uta.edu.ec.facturacion/GenerarFacturaXML"/>
+            <input><soap:body use="literal"/></input>
+            <output><soap:body use="literal"/></output>
+        </operation>
+        <operation name="ConsultarComprobante">
+            <soap:operation soapAction="uta.edu.ec.facturacion/ConsultarComprobante"/>
+            <input><soap:body use="literal"/></input>
+            <output><soap:body use="literal"/></output>
+        </operation>
+    </binding>
+
+    <service name="FacturacionService">
+        <port name="FacturacionPort" binding="tns:FacturacionBinding">
+            <soap:address location="https://tu-api.onrender.com/facturacion"/>
+        </port>
+    </service>
+</definitions>
+"""
+
+@app.route('/facturacion', methods=['POST', 'GET'])
+def soap_endpoint():
+    """Endpoint SOAP que sirve el WSDL y procesa las operaciones."""
+    if request.method == 'GET' and 'wsdl' in request.args:
+        return Response(WSDL_CONTENT, mimetype='text/xml')
+    elif request.method == 'POST':
+        xml_respuesta = procesar_soap_facturacion(request.data)
+        return Response(xml_respuesta, mimetype='text/xml')
+    else:
+        return Response("Bad Request: use GET ?wsdl or POST SOAP envelope", status=400)
+
+
+# ==========================================
+# 🏠 RUTA PRINCIPAL
+# ==========================================
 @app.route("/")
 def home():
-    return jsonify({"success": True, "message": "API REST Unificada funcionando correctamente."})
+    return jsonify({"success": True, "message": "API REST + SOAP funcionando correctamente."})
 
 
 # ==========================================
@@ -174,10 +293,8 @@ def listar_usuarios():
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        # Se añade cedula a la consulta SQL
         cursor.execute("SELECT id, usuario, nombre_completo, rol, cedula FROM public.usuarios ORDER BY id ASC")
         rows = cursor.fetchall()
-
         data = []
         for row in rows:
             data.append({
@@ -185,7 +302,7 @@ def listar_usuarios():
                 "usuario": row[1],
                 "nombre_completo": row[2],
                 "rol": row[3],
-                "cedula": row[4] if row[4] is not None else "" # Maneja si hay usuarios antiguos sin cédula
+                "cedula": row[4] if row[4] is not None else ""
             })
         return jsonify({"success": True, "data": data})
     except Exception as e:
@@ -203,12 +320,11 @@ def crear_usuario():
         usuario = data.get("usuario")
         nombre_completo = data.get("nombre_completo")
         rol = data.get("rol", "Cliente")
-        cedula = data.get("cedula") # Captura la cédula desde el JSON del frontend
+        cedula = data.get("cedula")
 
         if not usuario or not nombre_completo or not cedula:
             return jsonify({"success": False, "message": "Usuario, nombre_completo y cédula son requeridos"}), 400
 
-        # Validación básica de longitud de cédula ecuatoriana
         if len(str(cedula)) != 10:
             return jsonify({"success": False, "message": "La cédula debe tener exactamente 10 dígitos"}), 400
 
@@ -240,7 +356,7 @@ def actualizar_usuario(id):
         data = request.get_json(silent=True) or {}
         nombre_completo = data.get("nombre_completo")
         rol = data.get("rol")
-        cedula = data.get("cedula") # Permite actualizar la cédula por si hubo error
+        cedula = data.get("cedula")
 
         conn = get_connection()
         cursor = conn.cursor()
