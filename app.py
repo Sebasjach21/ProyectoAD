@@ -12,7 +12,7 @@ from twilio.rest import Client
 
 # Importamos la lógica SOAP y las notificaciones unificadas
 from soap_logic import procesar_soap_facturacion
-from notifications import enviar_notificaciones_sistema
+#from notifications import enviar_notificaciones_sistema
 
 app = Flask(__name__)
 
