@@ -349,6 +349,7 @@ def actualizar_usuario(id):
     cursor = None
     try:
         data = request.get_json(silent=True) or {}
+        usuario = data.get("usuario")
         nombre_completo = data.get("nombre_completo")
         rol = data.get("rol")
         cedula = data.get("cedula")
@@ -359,13 +360,14 @@ def actualizar_usuario(id):
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE public.usuarios 
-            SET nombre_completo = COALESCE(%s, nombre_completo),
+            SET usuario = COALESCE(%s, usuario),
+                nombre_completo = COALESCE(%s, nombre_completo),
                 rol = COALESCE(%s, rol),
                 cedula = COALESCE(%s, cedula),
                 email = COALESCE(%s, email),
                 telefono = COALESCE(%s, telefono)
             WHERE id = %s
-        """, (nombre_completo, rol, cedula, email, telefono, id))
+        """, (usuario, nombre_completo, rol, cedula, email, telefono, id))
         conn.commit()
 
         return jsonify({"success": True, "message": f"Usuario {id} actualizado correctamente"})
