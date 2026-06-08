@@ -34,7 +34,7 @@ def enviar_email_factura(correo_destino, contenido_xml):
     msg['From'] = 'facturacion@techstore360.com'
     msg['To'] = correo_destino
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as smtp:
             smtp.starttls()
             smtp.login(SMTP_USER, SMTP_PASS)
             smtp.send_message(msg)
