@@ -16,7 +16,8 @@ CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "
 # ==========================================
 # 📦 CONEXIÓN A SUPABASE (POOL)
 # ==========================================
-db_url = os.getenv("DATABASE_URL")
+db_url = os.getenv("DATABASE_URL") or "postgresql://postgres.aifsfrslffnzfufodqwx:47OLPjn1vxbkbL6k@aws-1-us-west-2.pooler.supabase.com:5432/postgres"
+
 if not db_url:
     raise ValueError("Falta la variable de entorno DATABASE_URL")
 

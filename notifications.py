@@ -1,7 +1,10 @@
 import os
 import smtplib
 from email.message import EmailMessage
-from twilio.rest import Client
+try:
+    from twilio.rest import Client
+except ImportError:
+    raise ImportError("Twilio library is not installed. Please run 'pip install twilio==9.0.4' and ensure it is in your environment.")
 
 # ==========================================
 # 1. CONFIGURACIÓN DE TWILIO (COMPROBADA)
