@@ -81,49 +81,29 @@ def registrar_compra():
             total_general += subtotal
             detalles.append((prod_id, cant, precio, subtotal))
 
-        # Crear factura
-        cursor.execute(
-            "INSERT INTO public.facturas (usuario_id, total_general) VALUES (%s, %s) RETURNING factura_id",
-            (usuario_id, total_general)
-        )
-        factura_id = cursor.fetchone()[0]
-
-        # Insertar detalles, actualizar stock y mantener tabla compras simple
+        # Insertar compras, actualizar stock y mantener tabla compras simple
         for prod_id, cant, precio, subtotal in detalles:
-            # 1. Insertar detalle de factura
-            cursor.execute(
-                "INSERT INTO public.detalle_facturas (factura_id, producto_id, cantidad, precio_unitario, subtotal) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (factura_id, prod_id, cant, precio, subtotal)
-            )
-            
-            # 2. Retrocompatibilidad para GET /compras
+            # Retrocompatibilidad para GET /compras
             cursor.execute(
                 "INSERT INTO public.compras (usuario_id, producto_id, cantidad, total, fecha_compra) "
-                "VALUES (%s, %s, %s, %s, NOW() AT TIME ZONE 'UTC')",
+                "VALUES (%s, %s, %s, %s, NOW() AT TIME ZONE 'UTC') RETURNING compra_id",
                 (usuario_id, prod_id, cant, subtotal)
             )
+            # Solo capturamos el ID de la última compra insertada para retornar (comportamiento legacy)
+            factura_id = cursor.fetchone()[0]
 
-            # 3. Reducir stock
+            # Reducir stock
             cursor.execute(
                 "UPDATE public.productos SET stock = stock - %s WHERE producto_id = %s",
                 (cant, prod_id)
             )
 
         conn.commit()
-        
-        # DISPARAR FACTURACIÓN en segundo plano
-        try:
-            from services.facturacion import generar_y_enviar_factura
-            import threading
-            threading.Thread(target=generar_y_enviar_factura, args=(factura_id,)).start()
-        except Exception as e:
-            print(f"Advertencia: No se pudo iniciar facturación en background: {e}")
 
         return jsonify({
             "success": True, 
-            "message": "Compra registrada y factura generada con éxito", 
-            "factura_id": factura_id, 
+            "message": "Compra registrada con éxito", 
+            "compra_id": factura_id, 
             "total": total_general
         }), 201
     except Exception as e:
