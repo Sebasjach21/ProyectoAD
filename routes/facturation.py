@@ -162,3 +162,41 @@ def soap_endpoint():
                 return_connection(conn)
     else:
         return Response("Bad Request: use GET ?wsdl or POST SOAP envelope", status=400)
+
+
+# ==========================================
+# 📄 Endpoints para descargar facturas (XML y PDF)
+# ==========================================
+@bp.route("/factura/<int:id>/xml", methods=["GET"])
+def descargar_factura_xml(id):
+    try:
+        from services.facturacion import generar_xml_factura
+        xml_content = generar_xml_factura(id)
+        if not xml_content:
+            return jsonify({"success": False, "message": f"Factura {id} no encontrada"}), 404
+            
+        return Response(
+            xml_content,
+            mimetype="application/xml",
+            headers={"Content-Disposition": f"attachment; filename=FAC-2026-{str(id).zfill(5)}.xml"}
+        )
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@bp.route("/factura/<int:id>/pdf", methods=["GET"])
+def descargar_factura_pdf(id):
+    try:
+        from services.facturacion import generar_pdf_factura
+        pdf_data = generar_pdf_factura(id)
+        if not pdf_data:
+            return jsonify({"success": False, "message": f"Factura {id} no encontrada"}), 404
+            
+        return Response(
+            pdf_data,
+            mimetype="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=FAC-2026-{str(id).zfill(5)}.pdf"}
+        )
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+

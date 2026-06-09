@@ -46,42 +46,86 @@ def registrar_compra():
     try:
         data = request.get_json(silent=True) or {}
         usuario_id = data.get("usuario_id")
-        producto_id = data.get("producto_id")
-        cantidad = data.get("cantidad")
-        total = data.get("total")
+        productos = data.get("productos")  # [{"producto_id": "uuid", "cantidad": 2}, ...]
 
-        if not usuario_id or not producto_id or not cantidad or total is None:
-            return jsonify({"success": False, "message": "Faltan campos obligatorios"}), 400
+        # Compatibility with old single-product purchase payload
+        if not productos and data.get("producto_id"):
+            productos = [{"producto_id": data.get("producto_id"), "cantidad": data.get("cantidad")}]
+
+        if not usuario_id or not productos:
+            return jsonify({"success": False, "message": "Faltan datos obligatorios (usuario_id, productos)"}), 400
 
         conn = get_connection()
         cursor = conn.cursor()
+        total_general = 0
+        detalles = []
 
-        # Verificar stock con bloqueo de fila
-        cursor.execute(
-            "SELECT stock FROM public.productos WHERE producto_id = %s FOR UPDATE",
-            (producto_id,),
-        )
-        res = cursor.fetchone()
-        if not res:
-            return jsonify({"success": False, "message": "El producto no existe"}), 404
+        # Verificar stock con bloqueo de fila y calcular totales
+        for item in productos:
+            prod_id = item["producto_id"]
+            cant = item["cantidad"]
+            
+            cursor.execute(
+                "SELECT precio, stock FROM public.productos WHERE producto_id = %s FOR UPDATE",
+                (prod_id,)
+            )
+            res = cursor.fetchone()
+            if not res:
+                return jsonify({"success": False, "message": f"Producto {prod_id} no existe"}), 404
+                
+            precio, stock_actual = res
+            if stock_actual < cant:
+                return jsonify({"success": False, "message": f"Stock insuficiente para {prod_id}. Disponible: {stock_actual}"}), 400
+                
+            subtotal = precio * cant
+            total_general += subtotal
+            detalles.append((prod_id, cant, precio, subtotal))
 
-        stock_actual = res[0]
-        if stock_actual < cantidad:
-            return jsonify({"success": False, "message": f"Stock insuficiente. Disponible: {stock_actual}"}), 400
+        # Crear factura
+        cursor.execute(
+            "INSERT INTO public.facturas (usuario_id, total_general) VALUES (%s, %s) RETURNING factura_id",
+            (usuario_id, total_general)
+        )
+        factura_id = cursor.fetchone()[0]
 
-        # Reducir stock e insertar compra
-        cursor.execute(
-            "UPDATE public.productos SET stock = stock - %s WHERE producto_id = %s",
-            (cantidad, producto_id),
-        )
-        cursor.execute(
-            "INSERT INTO public.compras (usuario_id, producto_id, cantidad, total, fecha_compra) "
-            "VALUES (%s, %s, %s, %s, NOW() AT TIME ZONE 'UTC') RETURNING compra_id",
-            (usuario_id, producto_id, cantidad, total),
-        )
-        nueva_compra_id = cursor.fetchone()[0]
+        # Insertar detalles, actualizar stock y mantener tabla compras simple
+        for prod_id, cant, precio, subtotal in detalles:
+            # 1. Insertar detalle de factura
+            cursor.execute(
+                "INSERT INTO public.detalle_facturas (factura_id, producto_id, cantidad, precio_unitario, subtotal) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (factura_id, prod_id, cant, precio, subtotal)
+            )
+            
+            # 2. Retrocompatibilidad para GET /compras
+            cursor.execute(
+                "INSERT INTO public.compras (usuario_id, producto_id, cantidad, total, fecha_compra) "
+                "VALUES (%s, %s, %s, %s, NOW() AT TIME ZONE 'UTC')",
+                (usuario_id, prod_id, cant, subtotal)
+            )
+
+            # 3. Reducir stock
+            cursor.execute(
+                "UPDATE public.productos SET stock = stock - %s WHERE producto_id = %s",
+                (cant, prod_id)
+            )
+
         conn.commit()
-        return jsonify({"success": True, "message": "Compra registrada con éxito", "compra_id": nueva_compra_id}), 201
+        
+        # DISPARAR FACTURACIÓN en segundo plano
+        try:
+            from services.facturacion import generar_y_enviar_factura
+            import threading
+            threading.Thread(target=generar_y_enviar_factura, args=(factura_id,)).start()
+        except Exception as e:
+            print(f"Advertencia: No se pudo iniciar facturación en background: {e}")
+
+        return jsonify({
+            "success": True, 
+            "message": "Compra registrada y factura generada con éxito", 
+            "factura_id": factura_id, 
+            "total": total_general
+        }), 201
     except Exception as e:
         if conn:
             conn.rollback()
